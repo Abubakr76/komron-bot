@@ -2,18 +2,27 @@ import os
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask  # ⬅️ ДОБАВИЛИ ЭТО
+import threading         # ⬅️ ДОБАВИЛИ ЭТО
 
 # --- НАСТРОЙКИ ---
-# Эти переменные бот будет "читать" из секретного хранилища сервера (Render)
-# НЕ ВСТАВЛЯЙ СЮДА СВОИ КЛЮЧИ!
+#
+# ☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️
+# 
+# ТЫ ДОЛЖЕН ОТОЗВАТЬ СТАРЫЕ КЛЮЧИ И ВСТАВИТЬ СЮДА НОВЫЕ!
+# ЭТОТ ФАЙЛ БЕЗОПАСНЫЙ, ОН ЧИТАЕТ КЛЮЧИ ИЗ "SECRETS"
+#
+# ☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️☢️
+#
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 BOT_USERNAME = os.environ.get('BOT_USERNAME')
 
 # Проверка, что ключи нашлись на сервере
 if not TELEGRAM_TOKEN or not GEMINI_API_KEY or not BOT_USERNAME:
-    print("ОШИБКА: Один или несколько ключей (TELEGRAM_TOKEN, GEMINI_API_KEY, BOT_USERNAME) не найдены в Environment.")
-    exit()
+    print("ОШИБКА: Ключи (TELEGRAM_TOKEN, GEMINI_API_KEY, BOT_USERNAME) не найдены в Secrets.")
+    # Не выходим, чтобы Replit мог запуститься и показать ошибку в логах
+    # exit()
 
 # --- (ВОТ "МОЗГ", КОТОРЫЙ Я ПОЛНОСТЬЮ ПЕРЕПИСАЛ) ---
 BOT_PERSONA_INSTRUCTIONS = """
@@ -64,24 +73,43 @@ SYSTEM_ROLE:
 # ----------------------------------------
 
 # --- ИНИЦИАЛИЗАЦИЯ AI ---
-genai.configure(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-flash-latest') 
+    except Exception as e:
+        print(f"Ошибка инициализации Gemini: {e}")
+        model = None
+else:
+    model = None
 
-# Модель для ТЕКСТА
-model = genai.GenerativeModel('gemini-flash-latest') 
+# --- (НОВЫЙ КОД ДЛЯ "МИКРО-САЙТА") ---
+# Это нужно, чтобы Replit не "уснул"
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Я живой!" # Этот текст увидит UptimeRobot
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+# --- (КОНЕЦ НОВОГО КОДА) ---
+
 
 # --- ЛОГИКА БОТА ---
 
 # Эта функция будет вызываться при старте бота (/start)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text('Здарова. Я Комрон. Пиши, че хотел.')
-    # При старте сбрасываем историю
     context.user_data.clear()
 
 # Эта функция будет вызываться на ЛЮБОЕ текстовое сообщение
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message 
     
-    if not message.text or message.text.startswith('/'):
+    if not message.text or message.text.startswith('/') or not model:
+        if not model:
+            print("Ошибка: Модель Gemini не инициализирована. Проверь GEMINI_API_KEY.")
         return
 
     # Определяем, кто нам пишет и какой текст
@@ -97,23 +125,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # --- (УПРОЩЕННАЯ ЛОГИКА "ПАМЯТИ") ---
-    
-    # 1. Инициализируем "память", если ее нет
     if 'chat_history' not in context.user_data:
         context.user_data['chat_history'] = []
-
-    # 2. Получаем текущие данные
     chat_history = context.user_data['chat_history']
-
-    # 3. Добавляем новое сообщение пользователя в историю
     chat_history.append({'role': 'user', 'content': user_text})
-    
-    # 4. Обрезаем историю, если она слишком длинная (храним 100 последних сообщений)
     if len(chat_history) > 100:
         chat_history = chat_history[-100:]
         context.user_data['chat_history'] = chat_history
-
-    # 5. Готовим историю для отправки в AI (превращаем список в строку)
     history_string = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
     # --- (КОНЕЦ ЛОГИКИ "ПАМЯTI") ---
 
@@ -125,7 +143,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
-        # Теперь мы передаем в промт ДВА параметра
         final_prompt = BOT_PERSONA_INSTRUCTIONS.format(
             chat_history_string=history_string,
             user_text=user_text
@@ -134,11 +151,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         response = await model.generate_content_async(final_prompt)
         ai_response = response.text
 
-        # 6. Добавляем ответ бота в историю
         chat_history.append({'role': 'bot', 'content': ai_response})
-        context.user_data['chat_history'] = chat_history # Сохраняем
+        context.user_data['chat_history'] = chat_history 
 
-        # 7. Отправляем ответ
         await update.message.reply_text(ai_response)
         
     except Exception as e:
@@ -147,19 +162,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # --- ЗАПУСК БОТА ---
 def main() -> None:
-    print("Бот запускается...")
-    # Указываем, что хотим хранить user_data
-    application = Application.builder().token(TELEGRAM_TOKEN).persistence(None).build()
+    if not TELEGRAM_TOKEN:
+        print("Ошибка: TELEGRAM_TOKEN не найден. Бот не может запуститься.")
+        return
 
-    # Добавляем обработчики команд
+    print("Запускаем Flask-сервер (для UptimeRobot)...")
+    # Запускаем "микро-сайт" в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+
+    print("Бот запускается...")
+    application = Application.builder().token(TELEGRAM_TOKEN).persistence(None).build()
     application.add_handler(CommandHandler("start", start))
-    
-    # Добавляем обработчик всех текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Запускаем бота
     print("Бот запущен и готов к работе.")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+
