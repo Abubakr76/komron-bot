@@ -156,9 +156,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
 
 # Эта функция будет вызываться на ЛЮБОЕ текстовое сообщение
+# (ЭТИМ КОДОМ НУЖНО ПОЛНОСТЬЮ ЗАМЕНИТЬ СТАРУЮ ФУНКЦИЮ HANDLE_MESSAGE)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message 
     
+    # (Добавил проверку на редактирование сообщений, которая у тебя была)
+    if not message:
+        print("Получено обновление без 'message' (например, отредактированное сообщение). Игнорирую.")
+        return
+        
     if not message.text or message.text.startswith('/') or not model:
         if not model:
             print("Ошибка: Модель Gemini не инициализирована. Проверь GEMINI_API_KEY.")
@@ -176,10 +183,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Че хотел? Говори.")
         return
 
-    # --- (УПРОЩЕННАЯ ЛОГИКА "ПАМЯТИ") ---
+    # --- (ВОТ ИСПРАВЛЕННАЯ ЛОГИКА "ПАМЯТИ" + СЧЕТЧИК) ---
+    
+    # 1. Инициализируем "память", если ее нет
     if 'chat_history' not in context.user_data:
         context.user_data['chat_history'] = []
+    # 2. Инициализируем "счетчик оскорблений"
+    if 'insult_count' not in context.user_data:
+        context.user_data['insult_count'] = 0
+
+    # 3. Получаем текущие данные
     chat_history = context.user_data['chat_history']
+    insult_count = context.user_data['insult_count'] # ⬅️ МЫ ПОЛУЧИЛИ СЧЕТЧИК!
+
+    # 4. Добавляем новое сообщение пользователя в историю
     chat_history.append({'role': 'user', 'content': user_text})
     if len(chat_history) > 100:
         chat_history = chat_history[-100:]
@@ -195,23 +212,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
+        # --- (ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ) ---
+        # Теперь мы передаем в промт ВСЕ ТРИ переменные
         final_prompt = BOT_PERSONA_INSTRUCTIONS.format(
             chat_history_string=history_string,
+            insult_count=insult_count, # ⬅️ МЫ ПЕРЕДАЛИ СЧЕТЧИК В "МОЗГ"!
             user_text=user_text
         )
         
         response = await model.generate_content_async(final_prompt)
         ai_response = response.text
 
-        chat_history.append({'role': 'bot', 'content': ai_response})
-        context.user_data['chat_history'] = chat_history 
+        # --- (ЛОГИКА ОБНОВЛЕНИЯ СЧЕТЧИКА) ---
+        # Проверяем, ответил ли AI тегом [INSULT_DETECTED]
+        if "[INSULT_DETECTED]" in ai_response:
+            # Убираем тег из ответа
+            ai_response = ai_response.replace("[INSULT_DETECTED]", "").strip()
+            # Увеличиваем счетчик и сохраняем его
+            context.user_data['insult_count'] += 1
+            print(f"[LOG] Оскорбление # {context.user_data['insult_count']} от {update.message.from_user.username}")
+        # --- (КОНЕЦ ЛОГИКИ СЧЕТЧИКА) ---
 
+        # 6. Добавляем ответ бота в историю
+        chat_history.append({'role': 'bot', 'content': ai_response})
+        context.user_data['chat_history'] = chat_history # Сохраняем
+
+        # 7. Отправляем ответ
         await update.message.reply_text(ai_response)
         
     except Exception as e:
         print(f"Ошибка при обращении к Gemini: {e}")
         await update.message.reply_text("Бля, у меня AI сдох. Попробуй позже.")
-
 # --- ЗАПУСК БОТА ---
 def main() -> None:
     if not TELEGRAM_TOKEN:
@@ -233,5 +264,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
